@@ -1,0 +1,26 @@
+# Local tooling / agent config -- never share, may reference local paths,
+# permissions, or session state.
+.claude/
+
+# Python environment / build artifacts
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data -- the SQLite file holds real usernames, emails, and bcrypt
+# password hashes once anyone registers against a running instance.
+itc.db
+itc_database.db
+
+# Secrets -- JWT signing key, etc. Never commit real values; see
+# .env.local.example (frontend) for the non-secret template.
+.env
+.env.local
+.env.*.local
+
+# OS / editor cruft
+.DS_Store
+*.log
+.vscode/
+.idea/
