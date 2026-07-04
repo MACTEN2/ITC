@@ -1,76 +1,65 @@
-"""TDD suite for the learner-tier ITC ticket submission engine.
+"""TDD suite for the learner-tier ITC ticket resolution engine.
 
 These tests drive the real HTTP surface (`GET /api/tickets`,
 `POST /api/tickets/submit`) as an authenticated learner would, via
 FastAPI's `TestClient`. Auth/registration mechanics live in `test_auth.py`;
 admin-tier tickets live in `test_admin.py`. Shared fixtures (`client`,
 `learner_token`) live in `conftest.py`.
-"""
 
-import pytest
+Tickets are resolved by filling out a diagnostic form (root_cause,
+resolution_actions, resolution_notes) -- there is no code involved anywhere,
+mirroring how a real Help Desk / IT Support agent actually closes a ticket
+in a system like ServiceNow or Zendesk. See app/tickets_db.py for the full
+catalog and answer keys.
+"""
 
 from tests.conftest import auth_headers
 
 SUBMIT_URL = "/api/tickets/submit"
 TICKETS_URL = "/api/tickets"
 
-
-# ---------------------------------------------------------------------------
-# Fixture submissions
-# ---------------------------------------------------------------------------
-
-VALID_TICKET_1_SUBMISSION = '''
-import csv
-import json
-
-GROUP_MAP = {
-    "IT": ["VPN-Access", "Domain-Admins"],
-    "HR": ["HR-Portal", "Payroll-ReadOnly"],
-    "Finance": ["Finance-Systems", "Payroll-ReadOnly"],
-    "Sales": ["CRM-Access"],
-}
-
-
-def provision_users(csv_data):
-    reader = csv.DictReader(csv_data.strip().splitlines())
-    records = []
-    for row in reader:
-        first_name = row["first_name"].strip()
-        last_name = row["last_name"].strip()
-        department = row["department"].strip()
-        email = f"{first_name.lower()}.{last_name.lower()}@company.com"
-        records.append({
-            "first_name": first_name,
-            "last_name": last_name,
-            "department": department,
-            "email": email,
-            "groups": GROUP_MAP.get(department, ["General-Access"]),
-        })
-    return records
-'''
-
-# Silently returns nothing for every employee -- wrong output, but does not raise.
-BROKEN_TICKET_1_SUBMISSION = "def provision_users(csv_data):\n    return []\n"
-
-VALID_TICKET_2_SUBMISSION = (
-    "SELECT ip_address, COUNT(*) AS failed_attempts "
-    "FROM access_logs "
-    "WHERE status = 'FAILED' AND attempt_time >= datetime('now', '-1 hour') "
-    "GROUP BY ip_address "
-    "HAVING COUNT(*) > 5"
+TICKET_1_CORRECT_ROOT_CAUSE = (
+    "The account is locked from repeated failed logons using the old password after the forced reset"
 )
+TICKET_1_CORRECT_ACTIONS = [
+    "Unlock the account in Active Directory",
+    "Confirm with the user that they are entering the NEW password, not the old one",
+]
 
-# Attempts to chain a destructive statement after the SELECT.
-DESTRUCTIVE_TICKET_2_SUBMISSION = "DROP TABLE access_logs; SELECT 1"
+TICKET_2_CORRECT_ROOT_CAUSE = "The access point is overloaded with far more connected devices than it's rated for"
+TICKET_2_CORRECT_ACTIONS = [
+    "Install a second access point to split the client load",
+    "Enable the 5GHz radio so compatible devices can move off the crowded 2.4GHz band",
+]
 
-VALID_TICKET_3_SUBMISSION = '''
-import re
+TICKET_3_CORRECT_ROOT_CAUSE = (
+    "The nightly bulk import ran with duplicate-checking disabled, inserting new rows for existing customers"
+)
+TICKET_3_CORRECT_ACTIONS = [
+    "Run the CRM's record de-duplication/merge tool on the affected customers",
+    "Re-enable duplicate-checking on the bulk import job going forward",
+    "Notify Sales so the duplicate invoices can be corrected",
+]
+
+TICKET_4_CORRECT_ROOT_CAUSE = "A phishing attempt impersonating a vendor using a lookalike domain"
+TICKET_4_CORRECT_ACTIONS = [
+    "Quarantine the email and report it to the security team",
+    "Advise the employee not to click any links or reply",
+    "Block the sender's domain at the email gateway",
+]
 
 
-def extract_unauthorized_ips(log_text):
-    pattern = r"(?:DENY|BLOCKED)\\s+src=(\\d{1,3}(?:\\.\\d{1,3}){3})"
-    return sorted({m.group(1) for m in re.finditer(pattern, log_text)})
-'''
+def _submit(client, token, ticket_id, root_cause, resolution_actions, resolution_notes="Resolved and documented."):
+    return client.post(
+        SUBMIT_URL,
+        json={
+            "ticket_id": ticket_id,
+            "root_cause": root_cause,
+            "resolution_actions": resolution_actions,
+            "resolution_notes": resolution_notes,
+        },
+        headers=auth_headers(token),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -83,157 +72,191 @@ def test_list_tickets_requires_authentication(client):
     assert response.status_code == 401
 
 
-def test_list_tickets_returns_only_the_three_learner_scenarios(client, learner_token):
+def test_list_tickets_returns_only_the_four_learner_scenarios(client, learner_token):
     response = client.get(TICKETS_URL, headers=auth_headers(learner_token))
 
     assert response.status_code == 200
     tickets = response.json()
-    assert len(tickets) == 3
-    assert {t["id"] for t in tickets} == {1, 2, 3}
+    assert len(tickets) == 4
+    assert {t["id"] for t in tickets} == {1, 2, 3, 4}
     assert {t["title"] for t in tickets} == {
-        "The User Provisioning Script",
-        "The Account Lockout Audit",
-        "The Firewall Breach",
+        "Employee Locked Out After Password Reset",
+        "Persistent Wi-Fi Drops in the East Conference Room",
+        "Duplicate Customer Records After CRM Import",
+        "Suspicious Email Reported by Finance",
     }
 
 
-# ---------------------------------------------------------------------------
-# Task 1: The User Provisioning Script (Python / csv / json)
-# ---------------------------------------------------------------------------
+def test_ticket_options_never_reveal_which_choice_is_correct(client, learner_token):
+    """The API must only ever expose the multiple-choice options, never a
+    field indicating which one is the answer."""
+    response = client.get(TICKETS_URL, headers=auth_headers(learner_token))
+    ticket = next(t for t in response.json() if t["id"] == 1)
 
-
-def test_task_1_valid_submission_grants_automation_xp(client, learner_token):
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 1, "submission": VALID_TICKET_1_SUBMISSION}, headers=auth_headers(learner_token)
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["passed"] is True
-    assert body["details"] == []
-    assert body["xp_awarded"] == 50
-    assert body["user"]["automation_xp"] == 50
-    # Only the automation track should move.
-    assert body["user"]["networking_xp"] == 0
-    assert body["user"]["database_xp"] == 0
-
-
-def test_task_1_broken_submission_fails_without_awarding_xp(client, learner_token):
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 1, "submission": BROKEN_TICKET_1_SUBMISSION}, headers=auth_headers(learner_token)
-    )
-
-    assert response.status_code == 200, "a wrong-but-non-crashing script must not error the API"
-    body = response.json()
-    assert body["passed"] is False
-    assert body["xp_awarded"] == 0
-    assert body["user"]["automation_xp"] == 0
-    assert len(body["details"]) > 0, "learner should get actionable feedback on what's missing"
+    assert set(ticket.keys()) == {
+        "id", "title", "department", "severity", "problem_description",
+        "root_cause_options", "resolution_options", "logs_context", "validation_criteria",
+    }
+    assert TICKET_1_CORRECT_ROOT_CAUSE in ticket["root_cause_options"]
 
 
 # ---------------------------------------------------------------------------
-# Task 2: The Account Lockout Audit (SQL / GROUP BY / HAVING)
+# Ticket 1: Employee Locked Out After Password Reset (Help Desk Tier 1)
 # ---------------------------------------------------------------------------
 
 
-def test_task_2_valid_sql_query_grants_database_xp(client, learner_token):
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 2, "submission": VALID_TICKET_2_SUBMISSION}, headers=auth_headers(learner_token)
-    )
+def test_ticket_1_correct_resolution_grants_automation_xp(client, learner_token):
+    response = _submit(client, learner_token, 1, TICKET_1_CORRECT_ROOT_CAUSE, TICKET_1_CORRECT_ACTIONS)
 
     assert response.status_code == 200
     body = response.json()
     assert body["passed"] is True
     assert body["details"] == []
     assert body["xp_awarded"] == 100
-    assert body["user"]["database_xp"] == 100
-    assert body["user"]["automation_xp"] == 0
+    assert body["user"]["automation_xp"] == 100
     assert body["user"]["networking_xp"] == 0
 
 
-def test_task_2_rejects_destructive_sql_statement(client, learner_token):
-    """Defense-in-depth: a stacked DROP TABLE must never reach the sandbox DB."""
-    response = client.post(
-        SUBMIT_URL,
-        json={"ticket_id": 2, "submission": DESTRUCTIVE_TICKET_2_SUBMISSION},
-        headers=auth_headers(learner_token),
+def test_ticket_1_wrong_root_cause_fails_without_awarding_xp(client, learner_token):
+    response = _submit(
+        client, learner_token, 1, "Caps Lock was enabled while entering the password", TICKET_1_CORRECT_ACTIONS
+    )
+
+    assert response.status_code == 200, "a wrong-but-valid submission must not error the API"
+    body = response.json()
+    assert body["passed"] is False
+    assert body["xp_awarded"] == 0
+    assert body["user"]["automation_xp"] == 0
+    assert any("root cause" in detail.lower() for detail in body["details"])
+
+
+def test_ticket_1_missing_resolution_step_fails(client, learner_token):
+    """Unlocking the account alone isn't enough -- it'll just re-lock unless
+    the user is also confirmed to be using the new password."""
+    response = _submit(
+        client, learner_token, 1, TICKET_1_CORRECT_ROOT_CAUSE, ["Unlock the account in Active Directory"]
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["passed"] is False
     assert body["xp_awarded"] == 0
-    assert "single sql statement" in body["message"].lower()
-
-    # The catalog must still be intact -- prove the DROP never executed.
-    tickets_response = client.get(TICKETS_URL, headers=auth_headers(learner_token))
-    assert len(tickets_response.json()) == 3
+    assert any("missing required resolution step" in detail.lower() for detail in body["details"])
 
 
-# ---------------------------------------------------------------------------
-# Task 3: The Firewall Breach (Python / re)
-# ---------------------------------------------------------------------------
-
-
-def test_task_3_valid_regex_script_grants_networking_xp(client, learner_token):
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 3, "submission": VALID_TICKET_3_SUBMISSION}, headers=auth_headers(learner_token)
+def test_ticket_1_extra_unnecessary_action_fails(client, learner_token):
+    response = _submit(
+        client,
+        learner_token,
+        1,
+        TICKET_1_CORRECT_ROOT_CAUSE,
+        [*TICKET_1_CORRECT_ACTIONS, "Escalate to Network Engineering"],
     )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert any("unnecessary or incorrect" in detail.lower() for detail in body["details"])
+
+
+def test_ticket_1_missing_resolution_notes_fails(client, learner_token):
+    response = _submit(client, learner_token, 1, TICKET_1_CORRECT_ROOT_CAUSE, TICKET_1_CORRECT_ACTIONS, "")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert any("resolution summary note is required" in detail.lower() for detail in body["details"])
+
+
+# ---------------------------------------------------------------------------
+# Ticket 2: Persistent Wi-Fi Drops in the East Conference Room (Network Support)
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_2_correct_resolution_grants_networking_xp(client, learner_token):
+    response = _submit(client, learner_token, 2, TICKET_2_CORRECT_ROOT_CAUSE, TICKET_2_CORRECT_ACTIONS)
 
     assert response.status_code == 200
     body = response.json()
     assert body["passed"] is True
-    assert body["details"] == []
-    assert body["xp_awarded"] == 150
-    assert body["user"]["networking_xp"] == 150
+    assert body["xp_awarded"] == 50
+    assert body["user"]["networking_xp"] == 50
     assert body["user"]["automation_xp"] == 0
-    assert body["user"]["database_xp"] == 0
 
 
-# ---------------------------------------------------------------------------
-# "Server Downtime Counter-Attack": broken submissions must fail gracefully,
-# never take the API down or corrupt XP state.
-# ---------------------------------------------------------------------------
-
-_SYNTAX_ERROR_SUBMISSION = "def extract_unauthorized_ips(log_text)\n    return []\n"  # missing colon
-
-_RUNTIME_LOGIC_ERROR_SUBMISSION = (
-    "import re\n\n\ndef extract_unauthorized_ips(log_text):\n    return undefined_variable\n"
-)
-
-_FORBIDDEN_IMPORT_SUBMISSION = (
-    "import os\n\n\ndef extract_unauthorized_ips(log_text):\n    os.system('echo pwned')\n    return []\n"
-)
-
-
-@pytest.mark.parametrize(
-    ("broken_submission", "expected_message_snippet"),
-    [
-        pytest.param(_SYNTAX_ERROR_SUBMISSION, "syntaxerror", id="syntax_error"),
-        pytest.param(_RUNTIME_LOGIC_ERROR_SUBMISSION, "raised an error", id="runtime_logic_error"),
-        pytest.param(_FORBIDDEN_IMPORT_SUBMISSION, "not permitted", id="sandbox_escape_attempt"),
-    ],
-)
-def test_server_downtime_counter_attack_handles_broken_submissions(
-    client, learner_token, broken_submission, expected_message_snippet
-):
-    """A crashing submission must be absorbed by the sandbox, not the server.
-
-    This is the "Server Downtime Counter-Attack" safety net: syntax errors,
-    runtime exceptions, and sandbox-escape attempts must all come back as a
-    clean HTTP 200 with `passed=False` and zero XP awarded -- never a 500, and
-    never a silent state change.
-    """
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 3, "submission": broken_submission}, headers=auth_headers(learner_token)
+def test_ticket_2_wrong_root_cause_fails(client, learner_token):
+    response = _submit(
+        client, learner_token, 2, "The access point's firmware is out of date", TICKET_2_CORRECT_ACTIONS
     )
 
-    assert response.status_code == 200, "the API must stay up even when the submission crashes"
+    assert response.status_code == 200
     body = response.json()
     assert body["passed"] is False
     assert body["xp_awarded"] == 0
-    assert body["user"]["networking_xp"] == 0
-    assert expected_message_snippet in body["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Ticket 3: Duplicate Customer Records After CRM Import (Database Administration)
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_3_correct_resolution_grants_database_xp(client, learner_token):
+    response = _submit(client, learner_token, 3, TICKET_3_CORRECT_ROOT_CAUSE, TICKET_3_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["xp_awarded"] == 100
+    assert body["user"]["database_xp"] == 100
+
+
+def test_ticket_3_partial_resolution_missing_a_step_fails(client, learner_token):
+    """Fixing the duplicates without also disabling future duplicate imports
+    just means the same problem recurs tomorrow night."""
+    response = _submit(
+        client,
+        learner_token,
+        3,
+        TICKET_3_CORRECT_ROOT_CAUSE,
+        ["Run the CRM's record de-duplication/merge tool on the affected customers"],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert any("missing required resolution step" in detail.lower() for detail in body["details"])
+
+
+# ---------------------------------------------------------------------------
+# Ticket 4: Suspicious Email Reported by Finance (Security Awareness / Help Desk)
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_4_correct_resolution_grants_automation_xp(client, learner_token):
+    response = _submit(client, learner_token, 4, TICKET_4_CORRECT_ROOT_CAUSE, TICKET_4_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["xp_awarded"] == 150
+    assert body["user"]["automation_xp"] == 150
+
+
+def test_ticket_4_treating_it_as_legitimate_is_a_dangerous_wrong_answer(client, learner_token):
+    """The single worst possible call here -- forwarding real banking
+    details to "verify" -- must fail cleanly, not be treated as valid input."""
+    response = _submit(
+        client,
+        learner_token,
+        4,
+        "A legitimate vendor invoice update",
+        ["Forward the employee's real banking details to verify"],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["xp_awarded"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -242,23 +265,17 @@ def test_server_downtime_counter_attack_handles_broken_submissions(
 
 
 def test_resubmission_after_success_does_not_double_award_xp(client, learner_token):
-    first = client.post(
-        SUBMIT_URL, json={"ticket_id": 1, "submission": VALID_TICKET_1_SUBMISSION}, headers=auth_headers(learner_token)
-    )
-    second = client.post(
-        SUBMIT_URL, json={"ticket_id": 1, "submission": VALID_TICKET_1_SUBMISSION}, headers=auth_headers(learner_token)
-    )
+    first = _submit(client, learner_token, 1, TICKET_1_CORRECT_ROOT_CAUSE, TICKET_1_CORRECT_ACTIONS)
+    second = _submit(client, learner_token, 1, TICKET_1_CORRECT_ROOT_CAUSE, TICKET_1_CORRECT_ACTIONS)
 
-    assert first.json()["xp_awarded"] == 50
+    assert first.json()["xp_awarded"] == 100
     assert second.json()["passed"] is True
     assert second.json()["xp_awarded"] == 0, "resubmitting an already-solved ticket must not farm XP"
-    assert second.json()["user"]["automation_xp"] == 50
+    assert second.json()["user"]["automation_xp"] == 100
 
 
 def test_invalid_ticket_id_returns_404(client, learner_token):
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 999, "submission": "SELECT 1"}, headers=auth_headers(learner_token)
-    )
+    response = _submit(client, learner_token, 999, "irrelevant", [])
     assert response.status_code == 404
 
 
@@ -267,12 +284,13 @@ def test_admin_only_ticket_is_not_reachable_via_the_learner_endpoint(client, lea
     even for a submission that would otherwise be graded correctly by
     `/api/admin/tickets/submit`.
     """
-    response = client.post(
-        SUBMIT_URL, json={"ticket_id": 4, "submission": "irrelevant"}, headers=auth_headers(learner_token)
-    )
+    response = _submit(client, learner_token, 5, "irrelevant", [])
     assert response.status_code == 404
 
 
 def test_submit_without_token_is_rejected(client):
-    response = client.post(SUBMIT_URL, json={"ticket_id": 1, "submission": VALID_TICKET_1_SUBMISSION})
+    response = client.post(
+        SUBMIT_URL,
+        json={"ticket_id": 1, "root_cause": TICKET_1_CORRECT_ROOT_CAUSE, "resolution_actions": TICKET_1_CORRECT_ACTIONS},
+    )
     assert response.status_code == 401

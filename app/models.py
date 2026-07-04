@@ -3,15 +3,19 @@
 Core tables:
     - User: an account (credentials + role) plus accumulated XP per skill track
       and "Infrastructure Stability Points" earned from admin-only tickets.
-    - Ticket: a catalog entry describing one hardcoded IT support scenario.
+    - Ticket: a catalog entry describing one hardcoded IT support scenario,
+      resolved by picking a root cause and the correct resolution action(s)
+      from a fixed multiple-choice list -- there is no code execution
+      anywhere in this app. This mirrors how a real Help Desk / IT Support
+      ticketing system (ServiceNow, Zendesk, etc.) actually works: an agent
+      diagnoses the issue and selects/logs the resolution, they don't write
+      and run scripts against production.
     - UserTicketProgress: the join/history table tracking a user's attempts on a ticket.
 
-Sandbox-only tables (never written through normal application flow -- see
-`tickets_db.py`) are seeded fresh into an isolated in-memory database for every
-single grading call, so untrusted user-submitted SQL/code can never touch
-persistent data:
-    - AccessLog: queried by Ticket #2 ("The Account Lockout Audit").
-    - MockEmployee: mutated by Admin Ticket #2 ("The Security Compliance Audit").
+The *correct* root cause / resolution actions for each ticket live only in
+`tickets_db.py` (Python code, never serialized to the API) -- the `Ticket`
+row itself only carries the multiple-choice *options* shown to the user, so
+`GET /api/tickets` can never leak the answer key.
 """
 
 import enum
@@ -36,20 +40,6 @@ class ProgressStatus(str, enum.Enum):
 
     OPEN = "Open"
     RESOLVED = "Resolved"
-
-
-class LoginStatus(str, enum.Enum):
-    """Outcome of a single authentication attempt in the access_logs sandbox table."""
-
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-
-
-class EmploymentType(str, enum.Enum):
-    """Staffing category in the mock_employees sandbox table."""
-
-    FULL_TIME = "Full-Time"
-    CONTRACTOR = "Contractor"
 
 
 def _utcnow() -> datetime:
@@ -92,7 +82,15 @@ class User(Base):
 
 
 class Ticket(Base):
-    """A catalog entry describing one hardcoded IT support scenario."""
+    """A catalog entry describing one hardcoded IT support scenario.
+
+    Resolved via a fixed multiple-choice "resolution form", not code:
+    `root_cause_options` is the single-select list of plausible causes shown
+    to the user, `resolution_options` is the multi-select checklist of
+    possible actions. Both lists include realistic wrong answers alongside
+    the correct one(s) -- the correct answer(s) are not stored here at all,
+    only in `tickets_db.py`.
+    """
 
     __tablename__ = "tickets"
 
@@ -102,16 +100,18 @@ class Ticket(Base):
     severity: Mapped[Severity] = mapped_column(Enum(Severity), nullable=False)
     problem_description: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Buggy/incomplete code (or a SQL query skeleton) the learner starts from.
-    starter_code: Mapped[str] = mapped_column(Text, nullable=False)
+    # Single-select: plausible root causes, exactly one of which is correct.
+    root_cause_options: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Multi-select: plausible resolution actions/steps; some subset is correct.
+    resolution_options: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
-    # Arbitrary supporting context (sample logs, CSV rosters, etc.) shown to the learner.
+    # Supporting context shown to the user (sample logs, a config dump, a
+    # directory listing, ...) -- read-only reference material, not something
+    # the ticket is graded against directly.
     logs_context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
-    # Human-readable description of what the automated grader checks -- shown to the
-    # learner so they know the acceptance criteria up front. The grading logic itself
-    # lives in code (`tickets_db.py`), not as data, so any correct approach passes;
-    # this field documents that logic rather than driving it.
+    # Human-readable description of what the grader checks -- shown to the
+    # learner so they know the acceptance criteria up front.
     validation_criteria: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     # Admin-only tickets are hidden from the standard learner catalog and require
@@ -135,7 +135,8 @@ class UserTicketProgress(Base):
     status: Mapped[ProgressStatus] = mapped_column(
         Enum(ProgressStatus), default=ProgressStatus.OPEN, nullable=False
     )
-    code_submission: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The learner's last submitted resolution form: {"root_cause": ..., "resolution_actions": [...], "resolution_notes": ...}
+    submission_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Set the moment a user's first attempt at this ticket is recorded.
     unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -144,53 +145,3 @@ class UserTicketProgress(Base):
 
     user: Mapped["User"] = relationship(back_populates="progress")
     ticket: Mapped["Ticket"] = relationship(back_populates="progress")
-
-
-class AccessLog(Base):
-    """Sandbox-only table representing router/auth access logs for Ticket #2.
-
-    Rows are never written through normal application flow; `tickets_db.py` creates
-    this table (via `Base.metadata.create_all`) inside a throwaway in-memory SQLite
-    engine and seeds it fresh for every submission so learner SQL runs in isolation.
-    """
-
-    __tablename__ = "access_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    ip_address: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
-    username: Mapped[str] = mapped_column(String(64), nullable=False)
-    # `values_callable` makes SQLAlchemy persist the enum's *value* ("FAILED")
-    # instead of its default of the member *name* -- both happen to read the
-    # same here, but this matters for MockEmployee below and is kept
-    # consistent so raw learner-submitted SQL always matches human-readable
-    # values, never Python identifier names.
-    status: Mapped[LoginStatus] = mapped_column(
-        Enum(LoginStatus, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
-        nullable=False,
-    )
-    attempt_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class MockEmployee(Base):
-    """Sandbox-only table for Admin Ticket #2 ("The Security Compliance Audit").
-
-    Like AccessLog, this is never populated through normal application flow --
-    `tickets_db.py` seeds it fresh into a throwaway in-memory SQLite engine for
-    every UPDATE submission, so a learner's SQL can never mutate real records.
-    """
-
-    __tablename__ = "mock_employees"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    first_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    last_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    department: Mapped[str] = mapped_column(String(64), nullable=False)
-    # `values_callable` here is not cosmetic: without it SQLAlchemy stores the
-    # enum's member *name* ("CONTRACTOR"), so a learner's `WHERE employment_type
-    # = 'Contractor'` -- which matches the value shown in the ticket description
-    # and in every SELECT result -- would silently match zero rows.
-    employment_type: Mapped[EmploymentType] = mapped_column(
-        Enum(EmploymentType, values_callable=lambda enum_cls: [e.value for e in enum_cls]),
-        nullable=False,
-    )
-    clearance_level: Mapped[str] = mapped_column(String(16), nullable=False)

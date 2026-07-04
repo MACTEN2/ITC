@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Ticket, User
 from app.routes.auth import get_current_user
-from app.tickets_db import TICKETS_BY_ID, grade_submission
+from app.tickets_db import TICKETS_BY_ID, TicketSubmission, grade_submission
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 class AdminTicketOut(BaseModel):
     """Public shape of an admin ticket -- same idea as the learner TicketOut,
-    plus `validation_criteria` since admins are expected to reason about
-    compliance/audit scope up front.
+    carrying only the multiple-choice options, never the answer key.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -68,14 +67,21 @@ class AdminTicketOut(BaseModel):
     department: str
     severity: str
     problem_description: str
-    starter_code: str
+    root_cause_options: list[str]
+    resolution_options: list[str]
     logs_context: dict
     validation_criteria: dict
 
 
 class AdminSubmissionRequest(BaseModel):
+    """An admin's filled-out resolution form for one admin-tier ticket."""
+
     ticket_id: int = Field(description="ID of the admin ticket being attempted.")
-    submission: str = Field(min_length=1, description="Python source or SQL statement the admin wrote.")
+    root_cause: str = Field(description="The selected root cause (must match one of the ticket's options).")
+    resolution_actions: list[str] = Field(
+        default_factory=list, description="The selected resolution step(s) (subset of the ticket's options)."
+    )
+    resolution_notes: str = Field(default="", description="Free-text resolution summary, required to close the ticket.")
 
 
 class AdminUserStats(BaseModel):
@@ -112,10 +118,10 @@ def submit_admin_ticket(
     current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminSubmissionResponse:
-    """Grade an admin submission in the same sandboxed pipeline as learner
-    tickets, but reward `infra_points` instead of a skill XP track. XP/points
-    are only granted on a user's first successful resolution of a given
-    ticket (see `grade_submission` in `tickets_db.py`).
+    """Grade an admin's resolution form using the same grading pipeline as
+    learner tickets, but reward `infra_points` instead of a skill XP track.
+    XP/points are only granted on a user's first successful resolution of a
+    given ticket (see `grade_submission` in `tickets_db.py`).
     """
     definition = TICKETS_BY_ID.get(payload.ticket_id)
     if definition is None or not definition.is_admin_only:
@@ -130,7 +136,12 @@ def submit_admin_ticket(
             detail=f"Admin ticket {payload.ticket_id} not found.",
         )
 
-    result, points_awarded, resolution_time = grade_submission(db, current_user, definition, payload.submission)
+    submission = TicketSubmission(
+        root_cause=payload.root_cause,
+        resolution_actions=payload.resolution_actions,
+        resolution_notes=payload.resolution_notes,
+    )
+    result, points_awarded, resolution_time = grade_submission(db, current_user, definition, submission)
 
     logger.info(
         "Admin '%s' (id=%s) submitted ticket %s (%s): passed=%s points_awarded=%s resolution_time=%.4fs",

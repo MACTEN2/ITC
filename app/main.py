@@ -31,7 +31,7 @@ from app.database import SessionLocal, get_db, init_db
 from app.models import Ticket, User
 from app.routes import admin, auth
 from app.routes.auth import get_current_user
-from app.tickets_db import TICKETS, grade_submission, TICKETS_BY_ID
+from app.tickets_db import TICKETS, TICKETS_BY_ID, TicketSubmission, grade_submission
 
 # INFO-level app logs (admin route access, submission audit trail) are silently
 # dropped under Python's default root level of WARNING. This makes them actually
@@ -41,28 +41,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 
 def _seed_ticket_catalog() -> None:
-    """Insert any ticket from the hardcoded catalog that isn't in the DB yet.
+    """Sync every ticket row with the hardcoded catalog: insert if missing,
+    overwrite every field if already present.
 
-    Idempotent and additive-only: existing rows (and any progress/XP tied to
-    them via foreign key) are left alone on every restart.
+    `tickets_db.py` is the single source of truth for ticket content -- there's
+    no admin UI for editing a ticket's text independently of it -- so treating
+    the DB row as anything other than a mirror of the current TICKETS list is
+    a bug: an earlier version of this function only inserted missing rows,
+    which meant editing a ticket's content in code had *no effect* on an
+    existing database until it was deleted by hand. `UserTicketProgress` rows
+    (by ticket_id FK) are untouched either way.
     """
     db = SessionLocal()
     try:
         for definition in TICKETS:
-            if db.get(Ticket, definition.id) is None:
-                db.add(
-                    Ticket(
-                        id=definition.id,
-                        title=definition.title,
-                        department=definition.department,
-                        severity=definition.severity,
-                        problem_description=definition.problem_description,
-                        starter_code=definition.starter_code,
-                        logs_context=definition.logs_context,
-                        validation_criteria=definition.validation_criteria,
-                        is_admin_only=definition.is_admin_only,
-                    )
-                )
+            ticket = db.get(Ticket, definition.id)
+            if ticket is None:
+                ticket = Ticket(id=definition.id)
+                db.add(ticket)
+            ticket.title = definition.title
+            ticket.department = definition.department
+            ticket.severity = definition.severity
+            ticket.problem_description = definition.problem_description
+            ticket.root_cause_options = definition.root_cause_options
+            ticket.resolution_options = definition.resolution_options
+            ticket.logs_context = definition.logs_context
+            ticket.validation_criteria = definition.validation_criteria
+            ticket.is_admin_only = definition.is_admin_only
         db.commit()
     finally:
         db.close()
@@ -78,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="ITC - IT Operations and Systems Simulator",
     description="Practice entry-level IT support skills by resolving simulated IT tickets.",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -101,7 +106,11 @@ app.include_router(admin.router)
 
 
 class TicketOut(BaseModel):
-    """Public shape of a ticket returned to the front-end (no verification internals)."""
+    """Public shape of a ticket returned to the front-end.
+
+    Only ever carries the multiple-choice *options*, never which one is
+    correct -- the answer key lives solely in `tickets_db.py`.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -110,14 +119,21 @@ class TicketOut(BaseModel):
     department: str
     severity: str
     problem_description: str
-    starter_code: str
+    root_cause_options: list[str]
+    resolution_options: list[str]
     logs_context: dict
     validation_criteria: dict
 
 
 class SubmissionRequest(BaseModel):
+    """A learner's filled-out resolution form for one ticket."""
+
     ticket_id: int = Field(description="ID of the ticket being attempted.")
-    submission: str = Field(min_length=1, description="Python source or SQL query the learner wrote.")
+    root_cause: str = Field(description="The selected root cause (must match one of the ticket's options).")
+    resolution_actions: list[str] = Field(
+        default_factory=list, description="The selected resolution step(s) (subset of the ticket's options)."
+    )
+    resolution_notes: str = Field(default="", description="Free-text resolution summary, required to close the ticket.")
 
 
 class UserXP(BaseModel):
@@ -160,8 +176,7 @@ def submit_ticket(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> SubmissionResponse:
-    """Grade the calling user's submission in an isolated sandbox and award XP
-    on first success.
+    """Grade the calling user's resolution form and award XP on first success.
 
     XP is only granted the first time a given user resolves a given ticket
     (see `grade_submission` in `tickets_db.py`), so resubmitting an
@@ -171,7 +186,12 @@ def submit_ticket(
     if definition is None or definition.is_admin_only:
         raise HTTPException(status_code=404, detail=f"Ticket {payload.ticket_id} not found.")
 
-    result, xp_awarded, resolution_time = grade_submission(db, current_user, definition, payload.submission)
+    submission = TicketSubmission(
+        root_cause=payload.root_cause,
+        resolution_actions=payload.resolution_actions,
+        resolution_notes=payload.resolution_notes,
+    )
+    result, xp_awarded, resolution_time = grade_submission(db, current_user, definition, submission)
 
     return SubmissionResponse(
         passed=result.passed,
