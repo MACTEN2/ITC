@@ -7,19 +7,23 @@ and supporting context, diagnose the root cause from a fixed list of
 plausible options, select the resolution action(s) that actually fix it from
 a checklist, and write a short resolution note before closing the case.
 
-Seven tickets ship in two tiers:
+Eleven tickets ship in two tiers:
 
-    - 4 learner-facing tickets (`is_admin_only=False`), served by
+    - 7 learner-facing tickets (`is_admin_only=False`), served by
       `GET/POST /api/tickets*` and rewarded in one of the three skill XP tracks:
         1. Employee Locked Out After Password Reset (Help Desk Tier 1)
         2. Persistent Wi-Fi Drops in the East Conference Room (Network Support)
         3. Duplicate Customer Records After CRM Import (Database Administration)
         4. Suspicious Email Reported by Finance (Security Awareness / Help Desk)
-    - 3 admin-only tickets (`is_admin_only=True`), served by
+        8. VPN Connection Fails for Remote Employee After Password Change (Help Desk)
+        9. Slow Database Query Performance After Table Growth (Database Administration)
+        10. Shared Printer Offline for Entire Finance Floor (Network Operations)
+    - 4 admin-only tickets (`is_admin_only=True`), served by
       `GET/POST /api/admin/tickets*` and rewarded in `infra_points`:
         5. Employee Offboarding -- Immediate Access Revocation
         6. Compliance Flag: Contractor Access Review
         7. Critical Server Disk Space Emergency
+        11. Unpatched Critical Vulnerability on Public-Facing Server
 
 Grading is a single generic mechanism (`_make_selection_verifier`): the
 submitted root cause must exactly match the correct one, the submitted
@@ -353,6 +357,106 @@ _TICKET_7_CORRECT_ACTIONS = {
 
 
 # ---------------------------------------------------------------------------
+# Ticket 8: VPN Connection Fails for Remote Employee After Password Change (Help Desk)
+# ---------------------------------------------------------------------------
+
+_TICKET_8_ROOT_CAUSE_OPTIONS = [
+    "The VPN server is down for everyone",
+    "The VPN client is still using the cached old password instead of the new one",
+    "The employee's internet connection at home is down",
+    "The VPN license pool has run out of seats",
+]
+_TICKET_8_CORRECT_ROOT_CAUSE = _TICKET_8_ROOT_CAUSE_OPTIONS[1]
+
+_TICKET_8_RESOLUTION_OPTIONS = [
+    "Clear the saved/cached credentials in the VPN client",
+    "Have the employee re-enter and save the new password in the VPN client",
+    "Restart the VPN concentrator for all users",
+    "Reissue a new VPN license to the employee",
+    "Tell the employee to switch to mobile hotspot",
+]
+_TICKET_8_CORRECT_ACTIONS = {_TICKET_8_RESOLUTION_OPTIONS[0], _TICKET_8_RESOLUTION_OPTIONS[1]}
+
+
+# ---------------------------------------------------------------------------
+# Ticket 9: Slow Database Query Performance After Table Growth (Database Administration)
+# ---------------------------------------------------------------------------
+
+_TICKET_9_ROOT_CAUSE_OPTIONS = [
+    "The database server needs more RAM",
+    "A frequently-queried column has no index, causing full table scans as the table grew",
+    "The database license has expired",
+    "Too many users are connected at once",
+]
+_TICKET_9_CORRECT_ROOT_CAUSE = _TICKET_9_ROOT_CAUSE_OPTIONS[1]
+
+_TICKET_9_RESOLUTION_OPTIONS = [
+    "Add an index on the frequently-queried column",
+    "Verify query performance improves after the index is added",
+    "Document the change for future schema reviews",
+    "Buy additional RAM for the database server",
+    "Restart the database service",
+]
+_TICKET_9_CORRECT_ACTIONS = {
+    _TICKET_9_RESOLUTION_OPTIONS[0],
+    _TICKET_9_RESOLUTION_OPTIONS[1],
+    _TICKET_9_RESOLUTION_OPTIONS[2],
+}
+
+
+# ---------------------------------------------------------------------------
+# Ticket 10: Shared Printer Offline for Entire Finance Floor (Network Operations)
+# ---------------------------------------------------------------------------
+
+_TICKET_10_ROOT_CAUSE_OPTIONS = [
+    "The printer is out of toner",
+    "A newly added device on the network has a static IP conflicting with the printer's",
+    "The printer's firmware needs an update",
+    "The Finance floor's switch lost power",
+]
+_TICKET_10_CORRECT_ROOT_CAUSE = _TICKET_10_ROOT_CAUSE_OPTIONS[1]
+
+_TICKET_10_RESOLUTION_OPTIONS = [
+    "Reassign the conflicting device to a non-conflicting static IP",
+    "Confirm the printer comes back online after the conflict is resolved",
+    "Document the IP assignment to prevent a repeat conflict",
+    "Replace the toner cartridge",
+    "Power-cycle the entire floor switch",
+]
+_TICKET_10_CORRECT_ACTIONS = {
+    _TICKET_10_RESOLUTION_OPTIONS[0],
+    _TICKET_10_RESOLUTION_OPTIONS[1],
+    _TICKET_10_RESOLUTION_OPTIONS[2],
+}
+
+
+# ---------------------------------------------------------------------------
+# Admin Ticket 11: Unpatched Critical Vulnerability on Public-Facing Server
+# ---------------------------------------------------------------------------
+
+_TICKET_11_ROOT_CAUSE_OPTIONS = [
+    "This is a false positive from the vulnerability scanner",
+    "A critical security patch released 3 weeks ago was never applied to this server",
+    "The server is end-of-life and scheduled for decommission anyway",
+    "The vulnerability only affects internal, not public-facing, servers",
+]
+_TICKET_11_CORRECT_ROOT_CAUSE = _TICKET_11_ROOT_CAUSE_OPTIONS[1]
+
+_TICKET_11_RESOLUTION_OPTIONS = [
+    "Apply the missing critical security patch immediately",
+    "Verify the patched service restarts cleanly and the vulnerability no longer scans positive",
+    "Document the remediation timeline for the compliance audit trail",
+    "Dismiss the finding as a false positive",
+    "Wait for the next scheduled maintenance window before patching",
+]
+_TICKET_11_CORRECT_ACTIONS = {
+    _TICKET_11_RESOLUTION_OPTIONS[0],
+    _TICKET_11_RESOLUTION_OPTIONS[1],
+    _TICKET_11_RESOLUTION_OPTIONS[2],
+}
+
+
+# ---------------------------------------------------------------------------
 # Ticket catalog
 # ---------------------------------------------------------------------------
 
@@ -591,6 +695,138 @@ TICKETS: list[TicketDefinition] = [
         reward_field="infra_points",
         reward_amount=125,
         verify=_make_selection_verifier(_TICKET_7_CORRECT_ROOT_CAUSE, _TICKET_7_CORRECT_ACTIONS),
+        is_admin_only=True,
+    ),
+    TicketDefinition(
+        id=8,
+        title="VPN Connection Fails for Remote Employee After Password Change",
+        department="Help Desk",
+        severity=Severity.INCIDENT,
+        problem_description=(
+            "A remote employee (jkim) changed their password this morning and now "
+            "can't connect to the corporate VPN, even though they're using the new "
+            "password everywhere else. Diagnose the root cause and select the "
+            "correct resolution steps."
+        ),
+        root_cause_options=_TICKET_8_ROOT_CAUSE_OPTIONS,
+        resolution_options=_TICKET_8_RESOLUTION_OPTIONS,
+        logs_context={
+            "target_host": "VPN-GW-02 (Remote Access VPN Gateway)",
+            "raw_log": (
+                "User: jkim\n"
+                "VPN auth attempts (last 1h): 5 failed, 0 successful\n"
+                "Password last changed (directory): 2026-07-17 08:05:00\n"
+                "VPN client saved-credential timestamp: 2026-06-02 (stale)\n"
+                "Other services (email, SSO): authenticating successfully with new password"
+            ),
+        },
+        validation_criteria={
+            "checks": [
+                "Root cause correctly identifies stale cached credentials in the VPN client, not a server-wide outage.",
+                "Both clearing the cached credentials AND re-entering the new password are required.",
+                "A resolution note is required before the ticket can be closed.",
+            ]
+        },
+        reward_field="networking_xp",
+        reward_amount=75,
+        verify=_make_selection_verifier(_TICKET_8_CORRECT_ROOT_CAUSE, _TICKET_8_CORRECT_ACTIONS),
+    ),
+    TicketDefinition(
+        id=9,
+        title="Slow Database Query Performance After Table Growth",
+        department="Database Administration",
+        severity=Severity.INCIDENT,
+        problem_description=(
+            "The orders lookup page has slowed from under a second to over 15 "
+            "seconds as the orders table grew past 2 million rows. Diagnose the "
+            "root cause and select the correct remediation steps."
+        ),
+        root_cause_options=_TICKET_9_ROOT_CAUSE_OPTIONS,
+        resolution_options=_TICKET_9_RESOLUTION_OPTIONS,
+        logs_context={
+            "target_host": "ORDERS-DB02 (Primary Orders Database)",
+            "raw_log": (
+                "Slow query log: SELECT * FROM orders WHERE customer_email = ? (avg 14.8s)\n"
+                "Table row count: 2,104,332 (up from 180,000 six months ago)\n"
+                "Indexes on 'orders': PRIMARY KEY (order_id) only\n"
+                "Query plan: full table scan, no index used on customer_email"
+            ),
+        },
+        validation_criteria={
+            "checks": [
+                "Root cause correctly identifies the missing index, not a hardware/RAM issue.",
+                "All three steps (add the index, verify the improvement, document it) are required.",
+                "A resolution note is required before the ticket can be closed.",
+            ]
+        },
+        reward_field="database_xp",
+        reward_amount=100,
+        verify=_make_selection_verifier(_TICKET_9_CORRECT_ROOT_CAUSE, _TICKET_9_CORRECT_ACTIONS),
+    ),
+    TicketDefinition(
+        id=10,
+        title="Shared Printer Offline for Entire Finance Floor",
+        department="Network Operations",
+        severity=Severity.LOW,
+        problem_description=(
+            "The shared printer on the Finance floor went offline right after a "
+            "new department laptop was added to the network this morning. "
+            "Diagnose the root cause and select the correct fix."
+        ),
+        root_cause_options=_TICKET_10_ROOT_CAUSE_OPTIONS,
+        resolution_options=_TICKET_10_RESOLUTION_OPTIONS,
+        logs_context={
+            "target_host": "PRT-FIN-01 (Finance Floor Shared Printer, 10.20.4.55)",
+            "raw_log": (
+                "PRT-FIN-01 status: OFFLINE (duplicate IP detected: 10.20.4.55)\n"
+                "New device joined network today: LAPTOP-FIN-22, static IP 10.20.4.55\n"
+                "Toner level: 78%\n"
+                "Switch port for PRT-FIN-01: up/up, no errors"
+            ),
+        },
+        validation_criteria={
+            "checks": [
+                "Root cause correctly identifies the static IP conflict, not toner or firmware.",
+                "All three steps (reassign the conflicting IP, confirm recovery, document it) are required.",
+                "A resolution note is required before the ticket can be closed.",
+            ]
+        },
+        reward_field="networking_xp",
+        reward_amount=40,
+        verify=_make_selection_verifier(_TICKET_10_CORRECT_ROOT_CAUSE, _TICKET_10_CORRECT_ACTIONS),
+    ),
+    TicketDefinition(
+        id=11,
+        title="Unpatched Critical Vulnerability on Public-Facing Server",
+        department="Security / Governance",
+        severity=Severity.CATASTROPHIC,
+        problem_description=(
+            "A vulnerability scan flagged a critical, publicly-exploitable CVE on "
+            "a public-facing web server. Diagnose why this is still open and "
+            "select the correct remediation steps."
+        ),
+        root_cause_options=_TICKET_11_ROOT_CAUSE_OPTIONS,
+        resolution_options=_TICKET_11_RESOLUTION_OPTIONS,
+        logs_context={
+            "target_host": "WEB-EDGE-01 (Public-Facing Web Server)",
+            "raw_log": (
+                "Vulnerability: CVE-2026-1337 (Critical, CVSS 9.8, remotely exploitable)\n"
+                "Vendor patch released: 2026-06-26\n"
+                "Patch applied to WEB-EDGE-01: NO\n"
+                "Scan confidence: Confirmed (not a heuristic match)\n"
+                "Exposure: Internet-facing, port 443"
+            ),
+        },
+        validation_criteria={
+            "checks": [
+                "Root cause correctly identifies the missed patch, not a false positive.",
+                "All three steps (apply the patch, verify it, document it) are required.",
+                "A resolution note is required before the ticket can be closed.",
+            ]
+        },
+        reward_field="infra_points",
+        reward_amount=175,
+        verify=_make_selection_verifier(_TICKET_11_CORRECT_ROOT_CAUSE, _TICKET_11_CORRECT_ACTIONS),
         is_admin_only=True,
     ),
 ]

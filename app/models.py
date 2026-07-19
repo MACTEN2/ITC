@@ -21,7 +21,7 @@ row itself only carries the multiple-choice *options* shown to the user, so
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -145,3 +145,74 @@ class UserTicketProgress(Base):
 
     user: Mapped["User"] = relationship(back_populates="progress")
     ticket: Mapped["Ticket"] = relationship(back_populates="progress")
+
+
+class UserBadge(Base):
+    """One row per (user, badge) an account has unlocked.
+
+    The badge catalog itself (name/description/criteria) lives in code, in
+    `app/achievements_db.py` -- exactly the same split as `Ticket` (DB row,
+    no answer key) vs. `tickets_db.py` (the code-defined catalog). This table
+    only records *that* a given badge_id was earned and when.
+    """
+
+    __tablename__ = "user_badges"
+    __table_args__ = (UniqueConstraint("user_id", "badge_id", name="uq_user_badge"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    badge_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    earned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class Notification(Base):
+    """An in-app notification for a user (ticket resolved, badge unlocked, ...)."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    # Plain string rather than an Enum -- new notification types shouldn't need a migration.
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class NotificationPreference(Base):
+    """Per-user opt-out flags for each notification type.
+
+    A separate table (not new columns on `User`) because `Base.metadata.create_all()`
+    only issues CREATE TABLE for tables that don't exist yet -- it never ALTERs an
+    existing table, and this app has no migration tool. One row per user, created
+    lazily on first write; `GET /api/notifications/preferences` synthesizes the
+    all-True defaults below if no row exists yet, so there's no need to backfill
+    a row for every existing account.
+    """
+
+    __tablename__ = "notification_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True, nullable=False)
+    notify_ticket_resolved: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_badge_unlocked: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class LoginEvent(Base):
+    """One row per successful login, for the user's own 'recent sign-ins' list.
+
+    `ip_address` is `request.client.host` -- the direct TCP peer address as
+    FastAPI/Starlette sees it. This app has no reverse proxy in front of it, so
+    that's meaningful here; it deliberately does NOT parse `X-Forwarded-For` or
+    similar headers, which are client-suppliable and not trustworthy without a
+    proxy validating them. `user_agent` is stored raw (no parsing dependency
+    exists in this project to turn it into a friendly "Chrome on macOS" label).
+    """
+
+    __tablename__ = "login_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

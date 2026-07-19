@@ -247,14 +247,19 @@ pytest tests/ -v
 `TestClient` (shared fixtures in `conftest.py`: `client`, `learner_token`,
 `admin_token`). Coverage includes:
 
-- **test_tickets.py** — the learner-tier engine: correct resolutions per
+- **test_tickets.py** — 
+the learner-tier engine: correct resolutions per
   ticket, wrong root causes, missing/extra resolution steps, missing
   resolution notes, the "no answer key leaks over the API" check, anti-farming,
   cross-tier boundary enforcement, and the `401`-without-a-token path.
-- **test_auth.py** — registration (duplicate username/email, invalid email,
+
+- **test_auth.py** — 
+registration (duplicate username/email, invalid email,
   short password), login (success, wrong password, unknown user), protected
   routes (missing/malformed token), and that bcrypt salts independently per hash.
-- **test_admin.py** — the `401` → `403` → `404` authorization ladder, all
+
+- **test_admin.py** — 
+the `401` → `403` → `404` authorization ladder, all
   three admin tickets' grading logic (correct resolution, wrong root cause,
   missing/extra steps), and anti-farming for `infra_points`.
 
@@ -269,23 +274,29 @@ suite has run before, or which directory you run `pytest` from.
 
 ## Fixed issues
 
-- **`passlib` + modern `bcrypt` incompatibility.** `passlib` 1.7.4 (its last
+- **`passlib` + modern `bcrypt` incompatibility.** 
+`passlib` 1.7.4 (its last
   release) probes an internal `bcrypt.__about__` attribute that `bcrypt>=4.1`
   removed, breaking every hash/verify call. **Fix:** pinned `bcrypt==4.0.1` in
   `requirements.txt`, the newest release `passlib`'s version-sniffing still
   works against.
-- **INFO-level audit logs were silently dropped.** `app/routes/admin.py`'s
+
+- **INFO-level audit logs were silently dropped.** 
+`app/routes/admin.py`'s
   `logger.info(...)` calls (the audit trail this feature explicitly asks for)
   never appeared in server output, because Python's root logger defaults to
   `WARNING` and nothing configured it otherwise. Caught by grepping the live
   server log for expected audit lines and finding them missing. **Fix:**
   `logging.basicConfig(level=logging.INFO, ...)` in `app/main.py`.
-- **Test suite failed 7/11 when run from inside `tests/`** (pre-auth version
+
+- **Test suite failed 7/11 when run from inside `tests/`** 
+(pre-auth version
   of this app). `app/database.py` built the SQLite URL as the cwd-relative
   `sqlite:///./itc.db`, so launching from a different directory silently
   read/wrote a different file than the test fixture was resetting, leaking XP
   across tests. **Fix:** the DB path is built from `Path(__file__)`, always
   resolving to the same project-root file regardless of working directory.
+
 - **Ticket content edits never reached an existing database.** `_seed_ticket_catalog()`
   only inserted a `Ticket` row if its id was missing, so replacing a ticket's
   content in `tickets_db.py` had *no effect* on an already-running instance's
@@ -306,7 +317,9 @@ to the no-code resolution-form model above.)*
 - **No self-service admin promotion.** `is_admin` is only settable directly
   in the database — by design, not an oversight. There is intentionally no
   "become admin" request path.
-- **No partial credit.** A resolution form either matches the answer key
+  
+- **No partial credit.** 
+A resolution form either matches the answer key
   exactly (root cause + full resolution-action set + a non-empty note) or it
   doesn't — there's no scoring for "close enough."
 - Grading correctness is verified against a **fixed answer key** baked into

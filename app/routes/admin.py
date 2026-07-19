@@ -12,16 +12,27 @@ Every access attempt -- successful or rejected -- is logged, since these
 routes simulate governance actions (account deactivation, compliance data
 changes, infrastructure cleanup) an organization would genuinely want an
 audit trail for.
+
+Also home to two read-only admin views: `GET /users` (every account's public
+stats) and `GET /submissions` (every learner's past ticket submissions, for
+review/moderation). Neither exposes a way to grant `is_admin` over the API --
+promoting an account is deliberately DB-only (see the README's security model
+section), and `GET /users` stays that way on purpose: it lists accounts, it
+never mutates them.
 """
 
 import logging
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.achievements_db import evaluate_badges
 from app.database import get_db
-from app.models import Ticket, User
+from app.models import ProgressStatus, Ticket, User, UserBadge, UserTicketProgress
+from app.notifications import notify
 from app.routes.auth import get_current_user
 from app.tickets_db import TICKETS_BY_ID, TicketSubmission, grade_submission
 
@@ -89,6 +100,13 @@ class AdminUserStats(BaseModel):
     infra_points: int
 
 
+class BadgeOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    icon: str
+
+
 class AdminSubmissionResponse(BaseModel):
     passed: bool
     message: str
@@ -96,6 +114,7 @@ class AdminSubmissionResponse(BaseModel):
     infra_points_awarded: int
     resolution_time: float
     user: AdminUserStats
+    badges_unlocked: list[BadgeOut] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +173,13 @@ def submit_admin_ticket(
         resolution_time,
     )
 
+    newly_unlocked_badges = []
+    if result.passed and points_awarded > 0:
+        notify(db, current_user, "ticket_resolved", f"Ticket resolved: {definition.title} (+{points_awarded} infra points).")
+        newly_unlocked_badges = evaluate_badges(db, current_user)
+        for badge in newly_unlocked_badges:
+            notify(db, current_user, "badge_unlocked", f"Badge unlocked: {badge.name}.")
+
     return AdminSubmissionResponse(
         passed=result.passed,
         message=result.message,
@@ -161,4 +187,142 @@ def submit_admin_ticket(
         infra_points_awarded=points_awarded,
         resolution_time=resolution_time,
         user=AdminUserStats(current_role=current_user.current_role, infra_points=current_user.infra_points),
+        badges_unlocked=[
+            BadgeOut(id=b.id, name=b.name, description=b.description, icon=b.icon) for b in newly_unlocked_badges
+        ],
     )
+
+
+# ---------------------------------------------------------------------------
+# User management (view-only -- see module docstring)
+# ---------------------------------------------------------------------------
+
+
+class AdminUserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    email: str
+    current_role: str
+    is_admin: bool
+    networking_xp: int
+    automation_xp: int
+    database_xp: int
+    infra_points: int
+    created_at: datetime
+    resolved_ticket_count: int
+    badges_earned: int
+
+
+@router.get("/users", response_model=list[AdminUserOut])
+def list_users(
+    q: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[AdminUserOut]:
+    """Every account's public stats, for admin visibility only -- no endpoint
+    here (or anywhere) can promote/demote is_admin. See module docstring."""
+    query = db.query(User)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(User.username.ilike(like), User.email.ilike(like)))
+    users = query.order_by(User.id).offset(offset).limit(limit).all()
+
+    resolved_counts: dict[int, int] = {}
+    resolved_user_ids = (
+        db.query(UserTicketProgress.user_id).filter(UserTicketProgress.status == ProgressStatus.RESOLVED).all()
+    )
+    for (user_id,) in resolved_user_ids:
+        resolved_counts[user_id] = resolved_counts.get(user_id, 0) + 1
+
+    badge_counts: dict[int, int] = {}
+    for (user_id,) in db.query(UserBadge.user_id).all():
+        badge_counts[user_id] = badge_counts.get(user_id, 0) + 1
+
+    return [
+        AdminUserOut(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            current_role=user.current_role,
+            is_admin=user.is_admin,
+            networking_xp=user.networking_xp,
+            automation_xp=user.automation_xp,
+            database_xp=user.database_xp,
+            infra_points=user.infra_points,
+            created_at=user.created_at,
+            resolved_ticket_count=resolved_counts.get(user.id, 0),
+            badges_earned=badge_counts.get(user.id, 0),
+        )
+        for user in users
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Submission audit log
+# ---------------------------------------------------------------------------
+
+
+class SubmissionOut(BaseModel):
+    user_id: int
+    username: str
+    ticket_id: int
+    ticket_title: str
+    department: str
+    status: str
+    root_cause: str | None
+    resolution_actions: list[str]
+    resolution_notes: str | None
+    unlocked_at: datetime
+    resolved_at: datetime | None
+
+
+@router.get("/submissions", response_model=list[SubmissionOut])
+def list_submissions(
+    user_id: int | None = None,
+    ticket_id: int | None = None,
+    department: str | None = None,
+    status: ProgressStatus | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[SubmissionOut]:
+    """Every learner's past ticket submissions, across all users -- unlike
+    `GET /api/history`, which is scoped to the caller only. For review/moderation."""
+    query = (
+        db.query(UserTicketProgress, Ticket, User)
+        .join(Ticket, Ticket.id == UserTicketProgress.ticket_id)
+        .join(User, User.id == UserTicketProgress.user_id)
+        .filter(UserTicketProgress.submission_data.is_not(None))
+    )
+    if user_id is not None:
+        query = query.filter(UserTicketProgress.user_id == user_id)
+    if ticket_id is not None:
+        query = query.filter(UserTicketProgress.ticket_id == ticket_id)
+    if department is not None:
+        query = query.filter(Ticket.department == department)
+    if status is not None:
+        query = query.filter(UserTicketProgress.status == status)
+
+    rows = query.order_by(UserTicketProgress.unlocked_at.desc()).offset(offset).limit(limit).all()
+
+    return [
+        SubmissionOut(
+            user_id=user.id,
+            username=user.username,
+            ticket_id=ticket.id,
+            ticket_title=ticket.title,
+            department=ticket.department,
+            status=progress.status.value,
+            root_cause=(progress.submission_data or {}).get("root_cause"),
+            resolution_actions=(progress.submission_data or {}).get("resolution_actions", []),
+            resolution_notes=(progress.submission_data or {}).get("resolution_notes"),
+            unlocked_at=progress.unlocked_at,
+            resolved_at=progress.resolved_at,
+        )
+        for progress, ticket, user in rows
+    ]

@@ -25,11 +25,14 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.achievements_db import evaluate_badges
 from app.database import SessionLocal, get_db, init_db
-from app.models import Ticket, User
-from app.routes import admin, auth
+from app.models import Severity, Ticket, User
+from app.notifications import notify
+from app.routes import achievements, admin, analytics, auth, export, history, leaderboard, notifications, users
 from app.routes.auth import get_current_user
 from app.tickets_db import TICKETS, TICKETS_BY_ID, TicketSubmission, grade_submission
 
@@ -98,6 +101,13 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(admin.router)
+app.include_router(history.router)
+app.include_router(leaderboard.router)
+app.include_router(analytics.router)
+app.include_router(achievements.router)
+app.include_router(notifications.router)
+app.include_router(users.router)
+app.include_router(export.router)
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +153,13 @@ class UserXP(BaseModel):
     database_xp: int
 
 
+class BadgeOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    icon: str
+
+
 class SubmissionResponse(BaseModel):
     passed: bool
     message: str
@@ -150,6 +167,7 @@ class SubmissionResponse(BaseModel):
     xp_awarded: int
     resolution_time: float
     user: UserXP
+    badges_unlocked: list[BadgeOut] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +177,30 @@ class SubmissionResponse(BaseModel):
 
 @app.get("/api/tickets", response_model=list[TicketOut])
 def list_tickets(
-    current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
+    department: str | None = None,
+    severity: Severity | None = None,
+    q: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> list[Ticket]:
     """Return every open, learner-tier IT support scenario in the catalog.
 
     Requires a valid JWT (any account) but nothing else. Admin-only tickets
     are deliberately excluded here -- they only surface via
     `GET /api/admin/tickets`, which additionally requires `is_admin=True`.
+
+    Optional filters: `department` (exact match), `severity` (exact match),
+    and `q` (case-insensitive substring match against title + description).
     """
-    return db.query(Ticket).filter(Ticket.is_admin_only.is_(False)).order_by(Ticket.id).all()
+    query = db.query(Ticket).filter(Ticket.is_admin_only.is_(False))
+    if department is not None:
+        query = query.filter(Ticket.department == department)
+    if severity is not None:
+        query = query.filter(Ticket.severity == severity)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(Ticket.title.ilike(like), Ticket.problem_description.ilike(like)))
+    return query.order_by(Ticket.id).all()
 
 
 @app.post("/api/tickets/submit", response_model=SubmissionResponse)
@@ -193,6 +226,13 @@ def submit_ticket(
     )
     result, xp_awarded, resolution_time = grade_submission(db, current_user, definition, submission)
 
+    newly_unlocked_badges = []
+    if result.passed and xp_awarded > 0:
+        notify(db, current_user, "ticket_resolved", f"Ticket resolved: {definition.title} (+{xp_awarded} XP).")
+        newly_unlocked_badges = evaluate_badges(db, current_user)
+        for badge in newly_unlocked_badges:
+            notify(db, current_user, "badge_unlocked", f"Badge unlocked: {badge.name}.")
+
     return SubmissionResponse(
         passed=result.passed,
         message=result.message,
@@ -205,4 +245,7 @@ def submit_ticket(
             automation_xp=current_user.automation_xp,
             database_xp=current_user.database_xp,
         ),
+        badges_unlocked=[
+            BadgeOut(id=b.id, name=b.name, description=b.description, icon=b.icon) for b in newly_unlocked_badges
+        ],
     )

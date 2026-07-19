@@ -40,6 +40,13 @@ TICKET_7_CORRECT_ACTIONS = [
     "Configure scheduled log rotation going forward",
 ]
 
+TICKET_11_CORRECT_ROOT_CAUSE = "A critical security patch released 3 weeks ago was never applied to this server"
+TICKET_11_CORRECT_ACTIONS = [
+    "Apply the missing critical security patch immediately",
+    "Verify the patched service restarts cleanly and the vulnerability no longer scans positive",
+    "Document the remediation timeline for the compliance audit trail",
+]
+
 
 def _submit_admin(client, token, ticket_id, root_cause, resolution_actions, resolution_notes="Resolved and documented."):
     return client.post(
@@ -74,16 +81,17 @@ def test_admin_submit_forbidden_for_non_admin(client, learner_token):
     assert response.status_code == 403
 
 
-def test_admin_tickets_returns_three_admin_scenarios(client, admin_token):
+def test_admin_tickets_returns_four_admin_scenarios(client, admin_token):
     response = client.get(ADMIN_TICKETS_URL, headers=auth_headers(admin_token))
 
     assert response.status_code == 200
     tickets = response.json()
-    assert {t["id"] for t in tickets} == {5, 6, 7}
+    assert {t["id"] for t in tickets} == {5, 6, 7, 11}
     assert {t["title"] for t in tickets} == {
         "Employee Offboarding -- Immediate Access Revocation",
         "Compliance Flag: Contractor Access Review",
         "Critical Server Disk Space Emergency",
+        "Unpatched Critical Vulnerability on Public-Facing Server",
     }
 
 
@@ -200,6 +208,32 @@ def test_admin_ticket_7_blaming_hardware_instead_of_log_growth_fails(client, adm
 
 
 # ---------------------------------------------------------------------------
+# Admin Ticket 11: Unpatched Critical Vulnerability on Public-Facing Server
+# ---------------------------------------------------------------------------
+
+
+def test_admin_ticket_11_correct_resolution_grants_infra_points(client, admin_token):
+    response = _submit_admin(client, admin_token, 11, TICKET_11_CORRECT_ROOT_CAUSE, TICKET_11_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["infra_points_awarded"] == 175
+    assert body["user"]["infra_points"] == 175
+
+
+def test_admin_ticket_11_dismissing_as_false_positive_fails(client, admin_token):
+    response = _submit_admin(
+        client, admin_token, 11, "This is a false positive from the vulnerability scanner", TICKET_11_CORRECT_ACTIONS
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["infra_points_awarded"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Anti-farming across the admin tier
 # ---------------------------------------------------------------------------
 
@@ -214,9 +248,9 @@ def test_admin_resubmission_does_not_double_award_infra_points(client, admin_tok
     assert second.json()["user"]["infra_points"] == 100
 
 
-@pytest.mark.parametrize("ticket_id", [5, 6, 7])
+@pytest.mark.parametrize("ticket_id", [5, 6, 7, 11])
 def test_admin_ticket_ids_do_not_collide_with_learner_ids(ticket_id):
-    """Sanity check on the catalog itself: admin ticket ids (5-7) must never
-    overlap with learner ticket ids (1-4).
+    """Sanity check on the catalog itself: admin ticket ids must never
+    overlap with learner ticket ids.
     """
-    assert ticket_id not in {1, 2, 3, 4}
+    assert ticket_id not in {1, 2, 3, 4, 8, 9, 10}

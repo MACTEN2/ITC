@@ -27,7 +27,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -35,7 +35,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User
+from app.models import LoginEvent, Notification, NotificationPreference, User, UserBadge, UserTicketProgress
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +195,36 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class LoginEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ip_address: str | None
+    user_agent: str | None
+    created_at: datetime
+
+
+class AccountDeleteRequest(BaseModel):
+    current_password: str = Field(description="Required to confirm permanent account deletion.")
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Fields a user may self-edit. Username is deliberately not included --
+    it stays immutable to avoid churn (and because other rows don't
+    reference it as a stable foreign key)."""
+
+    email: str | None = Field(default=None, min_length=5, max_length=255)
+    current_password: str | None = Field(default=None, description="Required when setting new_password.")
+    new_password: str | None = Field(default=None, min_length=8, max_length=72)
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email_format(cls, value: str | None) -> str | None:
+        if value is not None and not _EMAIL_PATTERN.match(value):
+            raise ValueError("Not a valid email address.")
+        return value.lower() if value else value
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -227,7 +257,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> User:
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> TokenResponse:
+def login(
+    request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
+) -> TokenResponse:
     """Validate credentials and issue a JWT access token.
 
     Accepts OAuth2 password-flow form fields (`username`, `password`) rather
@@ -245,8 +277,33 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    db.add(
+        LoginEvent(
+            user_id=user.id,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    )
+    db.commit()
+
     access_token = create_access_token(user_id=user.id)
     return TokenResponse(access_token=access_token)
+
+
+@router.get("/login-activity", response_model=list[LoginEventOut])
+def get_login_activity(
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[LoginEvent]:
+    """The caller's own recent sign-ins, most recent first."""
+    return (
+        db.query(LoginEvent)
+        .filter(LoginEvent.user_id == current_user.id)
+        .order_by(LoginEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get("/me", response_model=UserPublic)
@@ -258,3 +315,60 @@ def read_current_user(current_user: User = Depends(get_current_user)) -> User:
     endpoint to resolve "who am I, and am I an admin" from that token.
     """
     return current_user
+
+
+@router.patch("/me", response_model=UserPublic)
+def update_current_user(
+    payload: ProfileUpdateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> User:
+    """Self-service profile edit: email and/or password change.
+
+    Changing the password requires the correct `current_password` -- knowing
+    a valid session token isn't sufficient on its own, the same way most
+    real account-settings pages re-prompt for the current password.
+    """
+    if payload.email is None and payload.new_password is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update were provided.")
+
+    if payload.email is not None and payload.email != current_user.email:
+        existing = db.query(User).filter(User.email == payload.email, User.id != current_user.id).first()
+        if existing is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="That email is already in use.")
+        current_user.email = payload.email
+
+    if payload.new_password is not None:
+        if not payload.current_password or not verify_password(payload.current_password, current_user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
+        current_user.hashed_password = hash_password(payload.new_password)
+
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_current_user(
+    payload: AccountDeleteRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> None:
+    """Permanently delete the caller's own account and every row referencing it.
+
+    Requires the current password, same re-confirmation pattern as changing it.
+    `UserTicketProgress` already cascades via its `User.progress` relationship,
+    but `UserBadge`/`Notification`/`NotificationPreference`/`LoginEvent` do not
+    have a `relationship()`/cascade defined on `User` at all, and this SQLite
+    database has no `PRAGMA foreign_keys=ON` to catch a missed one -- it would
+    just silently leave orphaned rows. Bulk-delete every child table explicitly
+    (including the one that *would* cascade anyway) so the full set is visible
+    in one place and isn't split between "manual" and "trust the ORM".
+    """
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
+
+    user_id = current_user.id
+    db.query(UserTicketProgress).filter(UserTicketProgress.user_id == user_id).delete()
+    db.query(UserBadge).filter(UserBadge.user_id == user_id).delete()
+    db.query(Notification).filter(Notification.user_id == user_id).delete()
+    db.query(NotificationPreference).filter(NotificationPreference.user_id == user_id).delete()
+    db.query(LoginEvent).filter(LoginEvent.user_id == user_id).delete()
+    db.delete(current_user)
+    db.commit()

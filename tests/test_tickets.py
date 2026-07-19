@@ -48,6 +48,28 @@ TICKET_4_CORRECT_ACTIONS = [
     "Block the sender's domain at the email gateway",
 ]
 
+TICKET_8_CORRECT_ROOT_CAUSE = "The VPN client is still using the cached old password instead of the new one"
+TICKET_8_CORRECT_ACTIONS = [
+    "Clear the saved/cached credentials in the VPN client",
+    "Have the employee re-enter and save the new password in the VPN client",
+]
+
+TICKET_9_CORRECT_ROOT_CAUSE = (
+    "A frequently-queried column has no index, causing full table scans as the table grew"
+)
+TICKET_9_CORRECT_ACTIONS = [
+    "Add an index on the frequently-queried column",
+    "Verify query performance improves after the index is added",
+    "Document the change for future schema reviews",
+]
+
+TICKET_10_CORRECT_ROOT_CAUSE = "A newly added device on the network has a static IP conflicting with the printer's"
+TICKET_10_CORRECT_ACTIONS = [
+    "Reassign the conflicting device to a non-conflicting static IP",
+    "Confirm the printer comes back online after the conflict is resolved",
+    "Document the IP assignment to prevent a repeat conflict",
+]
+
 
 def _submit(client, token, ticket_id, root_cause, resolution_actions, resolution_notes="Resolved and documented."):
     return client.post(
@@ -72,18 +94,21 @@ def test_list_tickets_requires_authentication(client):
     assert response.status_code == 401
 
 
-def test_list_tickets_returns_only_the_four_learner_scenarios(client, learner_token):
+def test_list_tickets_returns_only_the_seven_learner_scenarios(client, learner_token):
     response = client.get(TICKETS_URL, headers=auth_headers(learner_token))
 
     assert response.status_code == 200
     tickets = response.json()
-    assert len(tickets) == 4
-    assert {t["id"] for t in tickets} == {1, 2, 3, 4}
+    assert len(tickets) == 7
+    assert {t["id"] for t in tickets} == {1, 2, 3, 4, 8, 9, 10}
     assert {t["title"] for t in tickets} == {
         "Employee Locked Out After Password Reset",
         "Persistent Wi-Fi Drops in the East Conference Room",
         "Duplicate Customer Records After CRM Import",
         "Suspicious Email Reported by Finance",
+        "VPN Connection Fails for Remote Employee After Password Change",
+        "Slow Database Query Performance After Table Growth",
+        "Shared Printer Offline for Entire Finance Floor",
     }
 
 
@@ -257,6 +282,138 @@ def test_ticket_4_treating_it_as_legitimate_is_a_dangerous_wrong_answer(client, 
     body = response.json()
     assert body["passed"] is False
     assert body["xp_awarded"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Ticket 8: VPN Connection Fails for Remote Employee After Password Change
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_8_correct_resolution_grants_networking_xp(client, learner_token):
+    response = _submit(client, learner_token, 8, TICKET_8_CORRECT_ROOT_CAUSE, TICKET_8_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["xp_awarded"] == 75
+    assert body["user"]["networking_xp"] == 75
+
+
+def test_ticket_8_assuming_server_wide_outage_fails(client, learner_token):
+    response = _submit(client, learner_token, 8, "The VPN server is down for everyone", TICKET_8_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["xp_awarded"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Ticket 9: Slow Database Query Performance After Table Growth
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_9_correct_resolution_grants_database_xp(client, learner_token):
+    response = _submit(client, learner_token, 9, TICKET_9_CORRECT_ROOT_CAUSE, TICKET_9_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["xp_awarded"] == 100
+    assert body["user"]["database_xp"] == 100
+
+
+def test_ticket_9_blaming_ram_instead_of_missing_index_fails(client, learner_token):
+    response = _submit(
+        client, learner_token, 9, "The database server needs more RAM", TICKET_9_CORRECT_ACTIONS
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["xp_awarded"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Ticket 10: Shared Printer Offline for Entire Finance Floor
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_10_correct_resolution_grants_networking_xp(client, learner_token):
+    response = _submit(client, learner_token, 10, TICKET_10_CORRECT_ROOT_CAUSE, TICKET_10_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["xp_awarded"] == 40
+    assert body["user"]["networking_xp"] == 40
+
+
+def test_ticket_10_blaming_toner_instead_of_ip_conflict_fails(client, learner_token):
+    response = _submit(client, learner_token, 10, "The printer is out of toner", TICKET_10_CORRECT_ACTIONS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["xp_awarded"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Search & filter (GET /api/tickets?department=&severity=&q=)
+# ---------------------------------------------------------------------------
+
+
+def test_list_tickets_filters_by_department(client, learner_token):
+    response = client.get(TICKETS_URL, params={"department": "Network Operations"}, headers=auth_headers(learner_token))
+
+    assert response.status_code == 200
+    tickets = response.json()
+    assert {t["id"] for t in tickets} == {2, 10}
+
+
+def test_list_tickets_filters_by_severity(client, learner_token):
+    response = client.get(TICKETS_URL, params={"severity": "Catastrophic"}, headers=auth_headers(learner_token))
+
+    assert response.status_code == 200
+    tickets = response.json()
+    assert {t["id"] for t in tickets} == {4}
+
+
+def test_list_tickets_search_matches_description_case_insensitively(client, learner_token):
+    """'Phishing' appears in ticket 4's description ('Report Phishing' button) -- an
+    uppercase search term should still match it case-insensitively."""
+    response = client.get(TICKETS_URL, params={"q": "PHISHING"}, headers=auth_headers(learner_token))
+
+    assert response.status_code == 200
+    tickets = response.json()
+    assert {t["id"] for t in tickets} == {4}
+
+
+def test_list_tickets_search_matches_description_substring(client, learner_token):
+    response = client.get(TICKETS_URL, params={"q": "printer"}, headers=auth_headers(learner_token))
+
+    assert response.status_code == 200
+    tickets = response.json()
+    assert {t["id"] for t in tickets} == {10}
+
+
+def test_list_tickets_combined_filters_and_together(client, learner_token):
+    response = client.get(
+        TICKETS_URL,
+        params={"department": "Help Desk", "severity": "Incident"},
+        headers=auth_headers(learner_token),
+    )
+
+    assert response.status_code == 200
+    tickets = response.json()
+    assert {t["id"] for t in tickets} == {1, 8}
+
+
+def test_list_tickets_no_matches_returns_empty_list_not_error(client, learner_token):
+    response = client.get(TICKETS_URL, params={"department": "Nonexistent Dept"}, headers=auth_headers(learner_token))
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 # ---------------------------------------------------------------------------

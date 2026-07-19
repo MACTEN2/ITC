@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens for the ITC dark theme. Tailwind v4 turns each `--color-*`
+ * entry here into matching utilities automatically (e.g. `--color-void`
+ * gives you `bg-void`, `text-void`, `border-void`, ...) -- no separate
+ * tailwind.config.ts needed.
+ */
+@theme {
+  --color-void: #05070d;
+  --color-panel: #0d1017;
+  --color-panel-raised: #131722;
+  --color-border: #1f2633;
+  --color-border-soft: #171b26;
+
+  --color-accent: #22d3ee;
+  --color-accent-soft: #0891b2;
+  --color-accent-dim: #164e63;
+
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --color-success: #34d399;
+
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-void);
+  color: var(--color-body-text, #e5e7eb);
+}
+
+/*
+ * Light theme: toggled via `data-theme="light"` on <html> (see lib/preferences.ts
+ * and the pre-hydration script in app/layout.tsx), not a Tailwind `dark:` variant
+ * retrofit. Tailwind v4 compiles every utility to reference these `--color-*`
+ * custom properties directly (confirmed: `.text-gray-400{color:var(--color-gray-400)}`
+ * in the built CSS) rather than baking in static values, so overriding the
+ * properties here is enough to re-theme every utility that uses them --
+ * including Tailwind's own built-in gray scale, not just this app's custom
+ * tokens -- with no per-utility-class overrides needed. This plain (unlayered)
+ * block also beats Tailwind's `@layer utilities` regardless of selector
+ * specificity, per CSS's cascade-layer rules.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-void: #f8fafc;
+  --color-panel: #ffffff;
+  --color-panel-raised: #f1f5f9;
+  --color-border: #e2e8f0;
+  --color-border-soft: #edf2f7;
+
+  --color-accent: #0891b2;
+  --color-accent-soft: #0e7490;
+  --color-accent-dim: #cffafe;
+
+  --color-danger: #dc2626;
+  --color-warning: #d97706;
+  --color-success: #059669;
+
+  /* This app's text uses Tailwind's built-in gray-100..600 directly (never
+     bg-gray-N or border-gray-N), numbered by dark-mode role (100 = most
+     prominent, 600 = most muted). Light mode keeps the same role ordering
+     with inverted lightness -- 100 becomes near-black, 600 becomes a
+     readable-but-subtle mid-gray. */
+  --color-gray-100: #0f172a;
+  --color-gray-200: #1e293b;
+  --color-gray-300: #334155;
+  --color-gray-400: #475569;
+  --color-gray-500: #64748b;
+  --color-gray-600: #94a3b8;
+
+  --color-body-text: #1e293b;
+}
+
+/* Thin, dark-friendly scrollbars for the terminal/code panels. */
+.itc-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.itc-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.itc-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: 9999px;
+}
